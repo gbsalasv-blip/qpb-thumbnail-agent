@@ -74,6 +74,21 @@ def resolve_photo(photo_url, youtube_id):
     return None
 
 
+def extract_video_id(value):
+    """Accept a bare 11-char video ID or any YouTube URL and return the ID."""
+    if not value:
+        return ''
+    v = value.strip()
+    # Bare ID (no URL punctuation)
+    if '/' not in v and '?' not in v and ' ' not in v:
+        return v
+    m = re.search(r'(?:v=|/live/|/shorts/|youtu\.be/|/embed/)([A-Za-z0-9_-]{11})', v)
+    if m:
+        return m.group(1)
+    # Fallback: last path segment, stripped of query params
+    return v.split('/')[-1].split('?')[0].split('&')[0].strip()
+
+
 def fit_photo(photo_img, target_w, target_h):
     """Center-crop the source image to the target aspect ratio, then resize."""
     pw, ph = photo_img.size
@@ -315,6 +330,9 @@ def update_video(youtube, video_id, title, description, air_date_str):
 def run_pipeline(first_name, last_name, organization, notes, category_tag,
                  photo_url, youtube_id, air_date, guest_full=''):
     """Full pipeline for a single episode. Returns (title, description, video_url)."""
+    # Accept a full YouTube URL or a bare video ID
+    youtube_id = extract_video_id(youtube_id)
+
     # Fallback: if First/Last weren't provided but a full "Guest" name was,
     # split it (first token = first name, remainder = last name).
     if not first_name and not last_name and guest_full:
