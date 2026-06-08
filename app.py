@@ -1,11 +1,12 @@
 import os
 import io
 import re
+import math
 import json
 import requests
 import anthropic
 from flask import Flask, request, jsonify, redirect
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageFilter
 from google.oauth2.credentials import Credentials
 from google.oauth2.service_account import Credentials as ServiceAccountCredentials
 from google_auth_oauthlib.flow import Flow
@@ -128,96 +129,92 @@ def _scaled(img, target_w):
     return img.resize((target_w, h), Image.LANCZOS)
 
 
-def _wrap(draw, text, font, max_w):
-    words = text.split()
-    lines = []
-    current = ""
-    for word in words:
-        test = (current + " " + word).strip()
-        if draw.textlength(test, font=font) <= max_w:
-            current = test
-        else:
-            if current:
-                lines.append(current)
-            current = word
-    if current:
-        lines.append(current)
-    return lines or [""]
+def _radial_bg(W, H, cx, cy, inner=(255, 214, 70), outer=(242, 144, 36)):
+    """Smooth radial gradient: bright yellow center -> warm orange edges."""
+    sw, sh = 96, 54
+    small = Image.new("RGB", (sw, sh))
+    px = small.load()
+    maxd = math.hypot(max(cx, W - cx), max(cy, H - cy)) or 1
+    for yy in range(sh):
+        for xx in range(sw):
+            d = min(1.0, math.hypot(xx / sw * W - cx, yy / sh * H - cy) / maxd)
+            px[xx, yy] = (
+                int(inner[0] + (outer[0] - inner[0]) * d),
+                int(inner[1] + (outer[1] - inner[1]) * d),
+                int(inner[2] + (outer[2] - inner[2]) * d),
+            )
+    return small.resize((W, H), Image.BILINEAR)
+
+
+def _feather_photo(photo_img, w, h, fade=160):
+    """Center-crop to target aspect, then fade the right edge into transparency."""
+    pw, ph = photo_img.size
+    tr = w / h
+    sr = pw / ph
+    if sr > tr:
+        nw = int(ph * tr)
+        left = (pw - nw) // 2
+        photo = photo_img.crop((left, 0, left + nw, ph))
+    else:
+        nh = int(pw / tr)
+        top = (ph - nh) // 2
+        photo = photo_img.crop((0, top, pw, top + nh))
+    photo = photo.resize((w, h), Image.LANCZOS).convert("RGBA")
+    mask = Image.new("L", (w, h), 255)
+    md = ImageDraw.Draw(mask)
+    for x in range(w - fade, w):
+        md.line([(x, 0), (x, h)], fill=int(255 * (w - x) / fade))
+    photo.putalpha(mask)
+    return photo
 
 
 def generate_thumbnail(first_name, last_name, category_tag, topic, photo_img):
     W, H = 1280, 720
-    canvas = Image.new("RGB", (W, H), YELLOW)
+    canvas = _radial_bg(W, H, int(W * 0.60), int(H * 0.40))
     draw = ImageDraw.Draw(canvas)
-    for x in range(0, W, 26):
-        for y in range(0, H, 26):
-            draw.ellipse([x-2, y-2, x+2, y+2], fill=(255, 215, 80))
 
-    # Guest photo panel (full-height, left) with red accent stripe
-    PW = 520
+    # Guest photo (left), softly feathered into the background
     if photo_img:
-        canvas.paste(fit_photo(photo_img, PW, H), (0, 0))
-        draw.rectangle([PW, 0, PW+10, H], fill=RED)
-    else:
-        draw.polygon([(0, 0), (PW+70, 0), (PW-10, H), (0, H)], fill=RED)
+        ph = _feather_photo(photo_img, 650, H, fade=160)
+        canvas.paste(ph, (0, 0), ph)
 
-    cx = PW + 44
     right = W - 40
-    maxw = right - cx
 
-    # QPB brand logo (top-right)
+    # QPB brand logo (top) + iHeart Podcasts logo (top-right)
     if QPB_LOGO is not None:
-        logo = _scaled(QPB_LOGO, 250)
-        canvas.paste(logo, (W - logo.width - 18, 10), logo)
+        q = _scaled(QPB_LOGO, 250)
+        canvas.paste(q, (int(W * 0.46), 6), q)
+    if IHP_LOGO is not None:
+        ih = _scaled(IHP_LOGO, 96)
+        canvas.paste(ih, (W - ih.width - 26, 18), ih)
 
-    # Category tag (top-left of right area)
-    tag_y = 52
-    tag_font = get_font(24)
-    tw = draw.textlength(category_tag.upper(), font=tag_font)
-    draw.rectangle([cx, tag_y, cx + tw + 34, tag_y + 48], fill=BLACK)
-    draw.text((cx + 17, tag_y + 12), category_tag.upper(), font=tag_font, fill=YELLOW)
+    # Category tag (right-aligned black bar, yellow text)
+    cat = (category_tag or "").upper()
+    cf = get_font(26)
+    ctw = draw.textlength(cat, font=cf)
+    draw.rectangle([right - ctw - 34, 250, right, 298], fill=BLACK)
+    draw.text((right - ctw - 17, 262), cat, font=cf, fill=YELLOW)
 
-    # Guest name — auto-sized to fill width and height
+    # Guest name in white highlight boxes (bottom-right), auto-sized to fit
     fn = first_name.upper()
     ln = last_name.upper()
     longest = fn if len(fn) >= len(ln) else ln
-    NAME_TOP, NAME_BOT = 290, 508
-    size = 150
-    while size > 56:
+    size = 190
+    while size > 78:
         f = get_font(size)
-        asc, desc = f.getmetrics()
-        nh = asc + desc
-        step = int(nh * 0.84)
-        if draw.textlength(longest, font=f) <= maxw and (step + nh) <= (NAME_BOT - NAME_TOP):
+        if draw.textlength(longest, font=f) <= 720 - 56:
             break
         size -= 2
     name_font = get_font(size)
     asc, desc = name_font.getmetrics()
-    step = int((asc + desc) * 0.84)
-    draw.text((cx, NAME_TOP), fn, font=name_font, fill=BLACK)
-    draw.text((cx, NAME_TOP + step), ln, font=name_font, fill=RED)
-
-    # Topic box — bigger text, shrinks to fit 2 lines
-    TOPIC_TOP, TOPIC_BOT = 524, 628
-    topic_right = right - 150
-    tsize = 34
-    while tsize > 20:
-        topic_font = get_font(tsize)
-        line_height = int(tsize * 1.25)
-        lines = _wrap(draw, topic, topic_font, (topic_right - cx) - 40)
-        if len(lines) <= 2 and (len(lines) * line_height + 24) <= (TOPIC_BOT - TOPIC_TOP):
-            break
-        tsize -= 2
-    topic_height = len(lines) * line_height + 24
-    draw.rectangle([cx, TOPIC_TOP, topic_right, TOPIC_TOP + topic_height], fill=WHITE)
-    draw.rectangle([cx, TOPIC_TOP, cx + 12, TOPIC_TOP + topic_height], fill=RED)
-    for i, line in enumerate(lines):
-        draw.text((cx + 28, TOPIC_TOP + 12 + (i * line_height)), line, font=topic_font, fill=BLACK)
-
-    # iHeart Podcasts logo (bottom-right, transparent)
-    if IHP_LOGO is not None:
-        ih = _scaled(IHP_LOGO, 104)
-        canvas.paste(ih, (W - ih.width - 28, H - ih.height - 22), ih)
+    line_h = asc + desc
+    y = 330
+    for txt in (fn, ln):
+        tw = draw.textlength(txt, font=name_font)
+        bx0 = right - tw - 48
+        draw.rounded_rectangle([bx0, y, right, y + line_h + 10], radius=14, fill=WHITE)
+        draw.text((bx0 + 24, y + 2), txt, font=name_font, fill=BLACK)
+        y += line_h + 22
 
     return canvas
 
