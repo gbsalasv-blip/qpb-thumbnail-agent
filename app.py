@@ -283,8 +283,15 @@ def update_video(youtube, video_id, title, description, air_date_str):
 
 
 def run_pipeline(first_name, last_name, organization, notes, category_tag,
-                 photo_url, youtube_id, air_date):
+                 photo_url, youtube_id, air_date, guest_full=''):
     """Full pipeline for a single episode. Returns (title, description, video_url)."""
+    # Fallback: if First/Last weren't provided but a full "Guest" name was,
+    # split it (first token = first name, remainder = last name).
+    if not first_name and not last_name and guest_full:
+        parts = guest_full.split()
+        first_name = parts[0] if parts else ''
+        last_name = ' '.join(parts[1:])
+
     photo_img = resolve_photo(photo_url, youtube_id)
     topic = notes[:60] if notes else f"{first_name} {last_name} on Qué Pasa Boston"
     thumb_canvas = generate_thumbnail(first_name, last_name, category_tag, topic, photo_img)
@@ -313,7 +320,7 @@ def run_pipeline(first_name, last_name, organization, notes, category_tag,
 def sheet_get_rows(sheets, spreadsheet_id):
     resp = sheets.spreadsheets().values().get(
         spreadsheetId=spreadsheet_id,
-        range=f"'{SHEET_TAB}'!A2:L"
+        range=f"'{SHEET_TAB}'!A2:N"
     ).execute()
     return resp.get('values', [])
 
@@ -385,10 +392,11 @@ def process_episode():
         photo_url    = data.get('photo_url', '')
         youtube_id   = data.get('youtube_id', '')
         air_date     = data.get('air_date', '')
+        guest_full   = data.get('guest', '')
 
         title, description, video_url = run_pipeline(
             first_name, last_name, organization, notes, category_tag,
-            photo_url, youtube_id, air_date
+            photo_url, youtube_id, air_date, guest_full
         )
         return jsonify({
             'success': True,
@@ -403,7 +411,7 @@ def process_episode():
 
 @app.route('/batch', methods=['POST', 'GET'])
 def batch_process():
-    """Process every row in the sheet whose Thumbnail Status (col K) == 'Pending'."""
+    """Process every row in the sheet whose Thumbnail Status (col M) == 'Pending'."""
     spreadsheet_id = os.environ.get('SPREADSHEET_ID')
     sheets = get_sheets_client()
     if not sheets:
@@ -419,25 +427,29 @@ def batch_process():
     results = []
     processed = 0
 
-    # Column letters: I=Generated Title, J=Generated Description, K=Status, L=Result
+    # Sheet columns (0-indexed): A=Guest(full), B=Organization, C=Recording Date,
+    # D=Air Date, E=Notes, F=Photo, G=First Name, H=Last Name, I=Category Tag,
+    # J=YouTube Video ID, K=Generated Title, L=Generated Description,
+    # M=Thumbnail Status, N=Result
     for i, row in enumerate(rows):
         row_number = i + 2  # data starts at row 2
-        status = cell(row, 10)  # column K
+        status = cell(row, 12)  # column M
         if status.lower() != 'pending':
             continue
 
-        first_name   = cell(row, 0)   # A
-        last_name    = cell(row, 1)   # B
-        organization = cell(row, 2)   # C
-        notes        = cell(row, 3)   # D
-        air_date     = cell(row, 4)   # E
-        category_tag = cell(row, 5) or 'ENTREVISTA · INTERVIEW'  # F
-        photo_url    = cell(row, 6)   # G
-        youtube_id   = cell(row, 7)   # H
+        guest_full   = cell(row, 0)   # A
+        organization = cell(row, 1)   # B
+        air_date     = cell(row, 3)   # D
+        notes        = cell(row, 4)   # E
+        photo_url    = cell(row, 5)   # F
+        first_name   = cell(row, 6)   # G
+        last_name    = cell(row, 7)   # H
+        category_tag = cell(row, 8) or 'ENTREVISTA · INTERVIEW'  # I
+        youtube_id   = cell(row, 9)   # J
 
         # Mark as Processing immediately so a concurrent run won't double-process
         try:
-            sheet_update_cell(sheets, spreadsheet_id, 'K', row_number, 'Processing')
+            sheet_update_cell(sheets, spreadsheet_id, 'M', row_number, 'Processing')
         except Exception as e:
             results.append({'row': row_number, 'status': 'Error', 'error': f'status write failed: {e}'})
             continue
@@ -445,16 +457,16 @@ def batch_process():
         try:
             title, description, video_url = run_pipeline(
                 first_name, last_name, organization, notes, category_tag,
-                photo_url, youtube_id, air_date
+                photo_url, youtube_id, air_date, guest_full
             )
-            sheet_update_cell(sheets, spreadsheet_id, 'I', row_number, title)
-            sheet_update_cell(sheets, spreadsheet_id, 'J', row_number, description)
-            sheet_update_cell(sheets, spreadsheet_id, 'K', row_number, 'Done')
-            sheet_update_cell(sheets, spreadsheet_id, 'L', row_number, video_url)
+            sheet_update_cell(sheets, spreadsheet_id, 'K', row_number, title)
+            sheet_update_cell(sheets, spreadsheet_id, 'L', row_number, description)
+            sheet_update_cell(sheets, spreadsheet_id, 'M', row_number, 'Done')
+            sheet_update_cell(sheets, spreadsheet_id, 'N', row_number, video_url)
             processed += 1
             results.append({
                 'row': row_number,
-                'guest': f'{first_name} {last_name}',
+                'guest': guest_full or f'{first_name} {last_name}'.strip(),
                 'status': 'Done',
                 'title': title,
                 'video_url': video_url
@@ -462,13 +474,13 @@ def batch_process():
         except Exception as e:
             err = str(e)
             try:
-                sheet_update_cell(sheets, spreadsheet_id, 'K', row_number, 'Error')
-                sheet_update_cell(sheets, spreadsheet_id, 'L', row_number, err[:500])
+                sheet_update_cell(sheets, spreadsheet_id, 'M', row_number, 'Error')
+                sheet_update_cell(sheets, spreadsheet_id, 'N', row_number, err[:500])
             except:
                 pass
             results.append({
                 'row': row_number,
-                'guest': f'{first_name} {last_name}',
+                'guest': guest_full or f'{first_name} {last_name}'.strip(),
                 'status': 'Error',
                 'error': err
             })
