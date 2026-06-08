@@ -92,6 +92,44 @@ def fit_photo(photo_img, target_w, target_h):
     return photo_img.crop(box).resize((target_w, target_h), Image.LANCZOS)
 
 
+# Brand logo assets (loaded once at startup; transparent PNGs)
+BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
+ASSETS_DIR = os.path.join(BASE_DIR, 'assets')
+
+
+def _load_logo(name):
+    try:
+        return Image.open(os.path.join(ASSETS_DIR, name)).convert("RGBA")
+    except Exception:
+        return None
+
+
+QPB_LOGO = _load_logo('qpb_logo.png')
+IHP_LOGO = _load_logo('iheart_podcasts.png')
+
+
+def _scaled(img, target_w):
+    h = int(img.height * (target_w / img.width))
+    return img.resize((target_w, h), Image.LANCZOS)
+
+
+def _wrap(draw, text, font, max_w):
+    words = text.split()
+    lines = []
+    current = ""
+    for word in words:
+        test = (current + " " + word).strip()
+        if draw.textlength(test, font=font) <= max_w:
+            current = test
+        else:
+            if current:
+                lines.append(current)
+            current = word
+    if current:
+        lines.append(current)
+    return lines or [""]
+
+
 def generate_thumbnail(first_name, last_name, category_tag, topic, photo_img):
     W, H = 1280, 720
     canvas = Image.new("RGB", (W, H), YELLOW)
@@ -99,81 +137,73 @@ def generate_thumbnail(first_name, last_name, category_tag, topic, photo_img):
     for x in range(0, W, 26):
         for y in range(0, H, 26):
             draw.ellipse([x-2, y-2, x+2, y+2], fill=(255, 215, 80))
-    draw.polygon([(0, 0), (510, 0), (430, H), (0, H)], fill=RED)
 
+    # Guest photo panel (full-height, left) with red accent stripe
+    PW = 520
     if photo_img:
-        photo = fit_photo(photo_img, 490, 700)
-        canvas.paste(photo, (10, 20))
+        canvas.paste(fit_photo(photo_img, PW, H), (0, 0))
+        draw.rectangle([PW, 0, PW+10, H], fill=RED)
     else:
-        draw.ellipse([140, 60, 340, 260], fill=(180, 40, 30))
-        draw.ellipse([60, 260, 420, 700], fill=(180, 40, 30))
+        draw.polygon([(0, 0), (PW+70, 0), (PW-10, H), (0, H)], fill=RED)
 
-    cx = 560
+    cx = PW + 44
+    right = W - 40
+    maxw = right - cx
 
-    # Logo bubble
-    bubble_x, bubble_y = cx, 60
-    draw.rounded_rectangle([bubble_x, bubble_y, bubble_x+260, bubble_y+80], radius=20, fill=CREAM)
-    draw.ellipse([bubble_x+230, bubble_y-18, bubble_x+278, bubble_y+28], fill=RED)
-    dot_cx = bubble_x + 254
-    dot_cy = bubble_y + 5
-    for ox in [-12, 0, 12]:
-        draw.ellipse([dot_cx+ox-5, dot_cy-5, dot_cx+ox+5, dot_cy+5], fill=WHITE)
-    logo_font_sm = get_font(20)
-    logo_font_lg = get_font(26)
-    draw.text((bubble_x+14, bubble_y+10), "¿QUE PASA", font=logo_font_sm, fill=BLACK)
-    draw.text((bubble_x+14, bubble_y+36), "BOSTON?", font=logo_font_lg, fill=RED)
+    # QPB brand logo (top-right)
+    if QPB_LOGO is not None:
+        logo = _scaled(QPB_LOGO, 250)
+        canvas.paste(logo, (W - logo.width - 18, 10), logo)
 
-    # Category tag bar
-    tag_font = get_font(20)
-    tag_y = bubble_y + 100
-    draw.rectangle([cx, tag_y, cx+460, tag_y+46], fill=BLACK)
-    draw.text((cx+14, tag_y+10), category_tag.upper(), font=tag_font, fill=YELLOW)
+    # Category tag (top-left of right area)
+    tag_y = 52
+    tag_font = get_font(24)
+    tw = draw.textlength(category_tag.upper(), font=tag_font)
+    draw.rectangle([cx, tag_y, cx + tw + 34, tag_y + 48], fill=BLACK)
+    draw.text((cx + 17, tag_y + 12), category_tag.upper(), font=tag_font, fill=YELLOW)
 
-    # Guest name
-    name_y = tag_y + 62
-    name_size = 90 if max(len(first_name), len(last_name)) <= 8 else 72
-    name_font = get_font(name_size)
-    draw.text((cx, name_y), first_name.upper(), font=name_font, fill=BLACK)
-    second_name_y = name_y + name_size + 6
-    draw.text((cx, second_name_y), last_name.upper(), font=name_font, fill=RED)
+    # Guest name — auto-sized to fill width and height
+    fn = first_name.upper()
+    ln = last_name.upper()
+    longest = fn if len(fn) >= len(ln) else ln
+    NAME_TOP, NAME_BOT = 290, 508
+    size = 150
+    while size > 56:
+        f = get_font(size)
+        asc, desc = f.getmetrics()
+        nh = asc + desc
+        step = int(nh * 0.84)
+        if draw.textlength(longest, font=f) <= maxw and (step + nh) <= (NAME_BOT - NAME_TOP):
+            break
+        size -= 2
+    name_font = get_font(size)
+    asc, desc = name_font.getmetrics()
+    step = int((asc + desc) * 0.84)
+    draw.text((cx, NAME_TOP), fn, font=name_font, fill=BLACK)
+    draw.text((cx, NAME_TOP + step), ln, font=name_font, fill=RED)
 
-    # Topic box (placed below the second name line)
-    topic_font = get_font(26)
-    line_height = 36
-    words = topic.split()
-    lines = []
-    current = ""
-    for word in words:
-        if len(current + " " + word) <= 35:
-            current = (current + " " + word).strip()
-        else:
-            if current:
-                lines.append(current)
-            current = word
-    if current:
-        lines.append(current)
-    if not lines:
-        lines = [""]
-
-    topic_y = second_name_y + name_size + 30
+    # Topic box — bigger text, shrinks to fit 2 lines
+    TOPIC_TOP, TOPIC_BOT = 524, 628
+    topic_right = right - 150
+    tsize = 34
+    while tsize > 20:
+        topic_font = get_font(tsize)
+        line_height = int(tsize * 1.25)
+        lines = _wrap(draw, topic, topic_font, (topic_right - cx) - 40)
+        if len(lines) <= 2 and (len(lines) * line_height + 24) <= (TOPIC_BOT - TOPIC_TOP):
+            break
+        tsize -= 2
     topic_height = len(lines) * line_height + 24
-    draw.rectangle([cx, topic_y, cx+620, topic_y+topic_height], fill=WHITE)
-    draw.rectangle([cx, topic_y, cx+8, topic_y+topic_height], fill=RED)
+    draw.rectangle([cx, TOPIC_TOP, topic_right, TOPIC_TOP + topic_height], fill=WHITE)
+    draw.rectangle([cx, TOPIC_TOP, cx + 12, TOPIC_TOP + topic_height], fill=RED)
     for i, line in enumerate(lines):
-        draw.text((cx+18, topic_y + 12 + (i * line_height)), line, font=topic_font, fill=BLACK)
+        draw.text((cx + 28, TOPIC_TOP + 12 + (i * line_height)), line, font=topic_font, fill=BLACK)
 
-    # iHeart badge
-    bx, by = W-290, H-76
-    draw.rectangle([bx, by, W-30, H-26], fill=RED)
-    ih_font_sm = get_font(14)
-    ih_font_lg = get_font(22)
-    draw.text((bx+50, by+8),  "iHEART",   font=ih_font_sm, fill=WHITE)
-    draw.text((bx+50, by+26), "PODCASTS", font=ih_font_lg, fill=WHITE)
-    draw.ellipse([bx+8, by+8, bx+28, by+28], fill=WHITE)
-    draw.ellipse([bx+18, by+8, bx+38, by+28], fill=WHITE)
-    draw.polygon([(bx+8, by+20), (bx+23, by+46), (bx+38, by+20)], fill=WHITE)
+    # iHeart Podcasts logo (bottom-right, transparent)
+    if IHP_LOGO is not None:
+        ih = _scaled(IHP_LOGO, 104)
+        canvas.paste(ih, (W - ih.width - 28, H - ih.height - 22), ih)
 
-    draw.rectangle([0, H-12, W, H], fill=YELLOW)
     return canvas
 
 
